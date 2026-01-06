@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 # ==================== CONFIGURATION ====================
-TEST_MODE = True
+TEST_MODE = True  # True for test order; False for arb
 
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
@@ -18,8 +18,6 @@ PRIVATE_KEY_PEM = os.getenv("KALSHI_PRIVATE_KEY")
 THRESHOLD = 1.0
 COUNT = 1
 CHECK_INTERVAL = 30
-
-TEST_TICKER = "TRUMPWIN-28"  # Verify this is a current open market
 # ======================================================
 
 print("BOT STARTUP - DEBUG ACTIVE")
@@ -33,17 +31,17 @@ except Exception as e:
     print(f"KEY LOAD ERROR: {e}")
     raise
 
-def canonical_json(body):
+def canonical_body(body):
     if not body:
         return ""
-    return json.dumps(body, separators=(',', ':'), sort_keys=True)
+    return json.dumps(body, sort_keys=True, separators=(',', ':'))
 
 def sign_request(method, path, body=None):
     now = datetime.now(timezone.utc)
     timestamp_ms = str(int(now.timestamp() * 1000))
-    body_str = canonical_json(body)
+    body_str = canonical_body(body)
     payload = timestamp_ms + method.upper() + path + body_str
-    print(f"Payload for signing: {payload[:100]}...")  # Debug
+    print(f"Signing payload (first 100 chars): {payload[:100]}...")
     signature = private_key.sign(
         payload.encode(),
         padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
@@ -68,56 +66,64 @@ def kalshi_request(method, endpoint, json_body=None):
             resp = requests.post(url, headers=headers, json=json_body)
         print(f"{method} {endpoint} -> {resp.status_code}")
         if resp.status_code >= 400:
-            print(f"Error body: {resp.text}")
+            print(f"Error: {resp.text}")
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
         print(f"REQUEST FAILED: {e}")
         raise
 
-# Functions same as before, using /portfolio/orders
-# ... (has_open_positions, find_best_arb, execute_arb with /portfolio/orders)
+# Get a real open market ticker dynamically
+def get_test_ticker():
+    try:
+        data = kalshi_request("GET", "/markets?status=open&limit=100")
+        if data["markets"]:
+            ticker = data["markets"][0]["ticker"]
+            print(f"Using real open market for test: {ticker}")
+            return ticker
+        print("No open markets found for test")
+        return None
+    except:
+        print("Failed to fetch markets for test ticker")
+        return None
 
 def execute_test_trade():
-    print("TEST MODE - Dummy YES buy at 1 cent")
+    ticker = get_test_ticker()
+    if not ticker:
+        print("Cannot run test - no open market")
+        return
+    print("TEST MODE - Placing dummy YES buy at 1 cent (won't fill)")
     test_payload = {
-        "ticker": TEST_TICKER,
         "action": "buy",
-        "type": "limit",
-        "count": 1,
+        "count": COUNT,
         "side": "yes",
+        "ticker": ticker,
+        "type": "limit",
         "yes_price": 1
     }
     kalshi_request("POST", "/portfolio/orders", test_payload)
-    print("Test order submitted - check Kalshi app")
+    print("Test order submitted! Check Kalshi app → Portfolio → Orders (cancel if it appears)")
 
 print("STARTUP COMPLETE")
 
 if TEST_MODE:
     execute_test_trade()
-    print("Test order submitted! Check your Kalshi account → Orders tab (cancel the test order if it appears)")
-    print("Once test works, set TEST_MODE = False and redeploy for full arbitrage mode")
+    print("Test complete - set TEST_MODE = False for arb mode")
 else:
-    print("FULL ARB MODE ACTIVE - Scanning every 30 seconds")
+    # Full arb loop (from previous fixed version)
     while True:
         try:
-            print(f"\n🔍 SCAN START {time.strftime('%H:%M:%S')}")
+            print(f"\nSCAN {time.strftime('%H:%M:%S')}")
             if has_open_positions():
-                print("Position open - waiting for settlement")
                 time.sleep(CHECK_INTERVAL)
                 continue
-
             opp = find_best_arb()
             if opp:
                 action, ticker, p1, p2, profit = opp
-                print(f"💰 ARB FOUND: {ticker} | {action.upper()} | +{profit}¢ profit")
                 execute_arb(action, ticker, p1, p2, profit)
             else:
-                print("😴 No arbitrage opportunity found this cycle")
-
-            print(f"Next scan in {CHECK_INTERVAL} seconds...")
+                print("No arb found")
             time.sleep(CHECK_INTERVAL)
-
         except Exception as e:
-            print(f"❌ LOOP ERROR: {e}")
+            print(f"ERROR: {e}")
             time.sleep(60)

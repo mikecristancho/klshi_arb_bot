@@ -3,15 +3,16 @@ import time
 import os
 
 # ==================== CONFIGURATION ====================
-DEMO_MODE = True  # Set False for live (your risk!)
-BASE_URL = "https://demo-api.kalshi.co/trade-api/v2" if DEMO_MODE else "https://trading-api.kalshi.com/trade-api/v2"
+# LIVE MODE - REAL MONEY!
+BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
 
+# Use environment variables (set these in Render dashboard!)
 EMAIL = os.getenv("KALSHI_EMAIL")
 PASSWORD = os.getenv("KALSHI_PASSWORD")
 
-THRESHOLD = 1.5      # Min profit % (1.5 cents = 1.5% guaranteed)
-COUNT = 1            # 1 contract only
-CHECK_INTERVAL = 60  # Check every minute
+THRESHOLD = 1.0        # Minimum guaranteed profit in cents (e.g., 1¢+ after fees)
+COUNT = 1              # Start with 1 contract only!
+CHECK_INTERVAL = 60    # Check every 60 seconds
 # ======================================================
 
 def login():
@@ -19,111 +20,110 @@ def login():
     payload = {"email": EMAIL, "password": PASSWORD}
     response = requests.post(url, json=payload)
     if response.status_code == 200:
-        print("✅ Login OK")
+        print("✅ Logged in to LIVE Kalshi account")
         return response.json()["token"]
-    raise Exception(f"Login failed: {response.text}")
+    else:
+        raise Exception(f"Login failed: {response.status_code} {response.text}")
 
-def get_positions(token):
-    """Check if we have ANY open positions"""
+def has_open_positions(token):
+    """Returns True if you have any open positions"""
     url = f"{BASE_URL}/portfolio/positions"
     headers = {"Authorization": f"Bearer {token}"}
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        positions = response.json().get("positions", [])
-        return len(positions) > 0
-    return False
+    resp = requests.get(url, headers=headers)
+    if resp.status_code == 200:
+        positions = resp.json().get("positions", [])
+        open_pos = [p for p in positions if p["quantity"] > 0]
+        if open_pos:
+            print(f"⏳ Holding {len(open_pos)} position(s) — waiting for settlement")
+        return len(open_pos) > 0
+    else:
+        print("Could not check positions")
+        return False
 
-def get_best_arb(token):
-    """Find BEST arbitrage opportunity"""
+def find_best_arb(token):
     url = f"{BASE_URL}/markets?status=open&limit=1000"
     headers = {"Authorization": f"Bearer {token}"}
-    response = requests.get(url, headers=headers)
-    
-    if response.status_code != 200:
+    resp = requests.get(url, headers=headers)
+    if resp.status_code != 200:
         return None
-    
-    best_opp = None
+
+    best = None
     best_profit = 0
-    
-    for market in response.json()["markets"]:
-        ticker = market["ticker"]
-        yes_ask = market.get("yes_ask")
-        no_ask = market.get("no_ask")
-        yes_bid = market.get("yes_bid")
-        no_bid = market.get("no_bid")
-        
-        # Buy Arb: Buy yes + buy no < 100
-        if yes_ask and no_ask and yes_ask + no_ask < 100:
-            profit = 100 - (yes_ask + no_ask)
-            if profit > best_profit and profit >= THRESHOLD:
-                best_opp = ("buy", ticker, yes_ask, no_ask, profit)
-                best_profit = profit
-        
-        # Sell Arb: Sell yes + sell no > 100  
-        if yes_bid and no_bid and yes_bid + no_bid > 100:
-            profit = (yes_bid + no_bid) - 100
-            if profit > best_profit and profit >= THRESHOLD:
-                best_opp = ("sell", ticker, yes_bid, no_bid, profit)
-                best_profit = profit
-    
-    return best_opp
 
-def place_arb_orders(token, action, ticker, price_yes, price_no):
-    """Place paired arbitrage orders"""
+    for m in resp.json()["markets"]:
+        t = m["ticker"]
+        ya = m.get("yes_ask")
+        na = m.get("no_ask")
+        yb = m.get("yes_bid")
+        nb = m.get("no_bid")
+
+        # Buy both sides arb
+        if ya is not None and na is not None and ya + na < 100:
+            profit = 100 - (ya + na)
+            if profit > best_profit and profit >= THRESHOLD:
+                best = ("buy", t, ya, na, profit)
+                best_profit = profit
+
+        # Sell both sides arb
+        if yb is not None and nb is not None and yb + nb > 100:
+            profit = (yb + nb) - 100
+            if profit > best_profit and profit >= THRESHOLD:
+                best = ("sell", t, yb, nb, profit)
+                best_profit = profit
+
+    return best
+
+def execute_arb(token, action, ticker, price1, price2):
     headers = {"Authorization": f"Bearer {token}"}
-    
-    # Yes order
-    yes_payload = {
-        "ticker": ticker, "action": action, "type": "limit", 
-        "count": COUNT, "side": "yes"
-    }
-    if action == "buy":
-        yes_payload["yes_price"] = price_yes
-    else:
-        yes_payload["no_price"] = price_yes  # sell yes at bid
-    
-    # No order  
-    no_payload = {
-        "ticker": ticker, "action": action, "type": "limit", 
-        "count": COUNT, "side": "no"
-    }
-    if action == "buy":
-        no_payload["no_price"] = price_no
-    else:
-        no_payload["yes_price"] = price_no  # sell no at bid
-    
-    # Place orders
-    requests.post(f"{BASE_URL}/orders", headers=headers, json=yes_payload)
-    time.sleep(0.5)
-    requests.post(f"{BASE_URL}/orders", headers=headers, json=no_payload)
-    print(f"🎯 ARB TRADE: {action.upper()} {COUNT}x {ticker} (profit: {price_yes + price_no - 100 if action=='sell' else 100 - (price_yes + price_no):.1f}¢)")
+    url = f"{BASE_URL}/orders"
 
-# ==================== MAIN BOT ====================
+    # Order 1: Yes side
+    p1 = {"ticker": ticker, "action": action, "type": "limit", "count": COUNT, "side": "yes"}
+    p1["yes_price" if action == "buy" else "no_price"] = price1  # buy yes at ask, sell yes at bid
+
+    # Order 2: No side
+    p2 = {"ticker": ticker, "action": action, "type": "limit", "count": COUNT, "side": "no"}
+    p2["no_price" if action == "buy" else "yes_price"] = price2
+
+    print(f"🚀 EXECUTING {action.upper()} ARB on {ticker} — Expected profit: {best_profit}¢")
+
+    # Place orders quickly
+    r1 = requests.post(url, headers=headers, json=p1)
+    time.sleep(0.3)
+    r2 = requests.post(url, headers=headers, json=p2)
+
+    print("Order 1 (YES):", "SUCCESS" if r1.status_code == 200 else f"FAIL {r1.text}")
+    print("Order 2 (NO): ", "SUCCESS" if r2.status_code == 200 else f"FAIL {r2.text}")
+
+# ==================== MAIN LOOP ====================
 if not EMAIL or not PASSWORD:
-    raise ValueError("Set KALSHI_EMAIL and KALSHI_PASSWORD env vars!")
+    raise ValueError("You MUST set KALSHI_EMAIL and KALSHI_PASSWORD in environment variables!")
 
-print("🚀 Product Bot Started - ONE POSITION ONLY")
+print("🔴 LIVE KALSHI ARB BOT STARTED — ONE POSITION ONLY")
 token = login()
 
 while True:
     try:
-        # SAFETY CHECK: Any open positions?
-        if get_positions(token):
-            print("⏳ Holding position... waiting to close")
+        if has_open_positions(token):
+            time.sleep(CHECK_INTERVAL)
+            continue
+
+        opp = find_best_arb(token)
+        if opp:
+            action, ticker, p1, p2, best_profit = opp
+            print(f"💰 BEST ARB FOUND: {ticker} → {action.upper()} → +{best_profit}¢ profit")
+            execute_arb(token, action, ticker, p1, p2)
         else:
-            # Find best arb
-            opp = get_best_arb(token)
-            if opp:
-                action, ticker, p1, p2, profit = opp
-                print(f"💰 BEST ARB: {ticker} | Profit: {profit}¢ | {action.upper()}")
-                place_arb_orders(token, action, ticker, p1, p2)
-            else:
-                print("😴 No good arbs found")
-        
-        print(f"Sleeping {CHECK_INTERVAL}s... " + time.strftime('%H:%M:%S'))
+            print("😴 No arbitrage opportunities above threshold")
+
+        print(f"Next check in {CHECK_INTERVAL}s...\n")
         time.sleep(CHECK_INTERVAL)
-        
+
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"❌ ERROR: {e}")
         time.sleep(30)
-        token = login()
+        try:
+            token = login()
+        except:
+            print("Re-login failed — waiting")
+            time.sleep(60)

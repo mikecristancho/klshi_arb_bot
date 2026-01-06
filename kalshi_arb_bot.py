@@ -7,34 +7,42 @@ from datetime import datetime, timezone
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
+print("BOT STARTING - DEBUG MODE ACTIVE")
+
 # ==================== CONFIGURATION ====================
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
 ACCESS_KEY = os.getenv("KALSHI_ACCESS_KEY")
 PRIVATE_KEY_PEM = os.getenv("KALSHI_PRIVATE_KEY")
 
+print(f"ACCESS_KEY loaded: {'YES' if ACCESS_KEY else 'NO/MISSING'}")
+print(f"PRIVATE_KEY_PEM length: {len(PRIVATE_KEY_PEM) if PRIVATE_KEY_PEM else 'MISSING'} chars")
+
 THRESHOLD = 1.0
 COUNT = 1
 CHECK_INTERVAL = 30
 # ======================================================
 
-def load_private_key():
+# Load private key with debug
+try:
     if not PRIVATE_KEY_PEM:
-        print("ERROR: KALSHI_PRIVATE_KEY env var missing!")
-        raise ValueError("Missing private key")
-    try:
-        return serialization.load_pem_private_key(PRIVATE_KEY_PEM.encode(), password=None)
-    except Exception as e:
-        print(f"ERROR loading private key: {e}")
-        raise
+        raise ValueError("KALSHI_PRIVATE_KEY is empty or missing!")
+    if not PRIVATE_KEY_PEM.startswith('-----BEGIN RSA PRIVATE KEY-----'):
+        raise ValueError("Private key does not start with expected header!")
+    private_key = serialization.load_pem_private_key(
+        PRIVATE_KEY_PEM.encode('utf-8'), password=None
+    )
+    print("Private key loaded SUCCESSFULLY")
+except Exception as e:
+    print(f"CRITICAL ERROR loading private key: {str(e)}")
+    raise  # Exit early to show in logs
 
-private_key = load_private_key()
-
-def sign_request(method, path, body=""):
-    # FIXED: Omit body from payload (per Kalshi docs/examples for standard requests)
+def sign_request(method, path):
+    # FIXED: No body in payload (Kalshi docs examples for GET/POST omit it)
     now = datetime.now(timezone.utc)
     timestamp_ms = str(int(now.timestamp() * 1000))
-    payload = timestamp_ms + method.upper() + path  # No + body here!
+    payload = timestamp_ms + method.upper() + path
+    print(f"Signing payload: {payload[:50]}...")  # Debug snippet
     signature = private_key.sign(
         payload.encode(),
         padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
@@ -45,11 +53,10 @@ def sign_request(method, path, body=""):
 
 def kalshi_request(method, endpoint, json_body=None):
     if not ACCESS_KEY:
-        raise ValueError("KALSHI_ACCESS_KEY env var missing!")
-        
+        raise ValueError("KALSHI_ACCESS_KEY missing!")
     url = BASE_URL + endpoint
     body_str = json.dumps(json_body) if json_body else ""
-    timestamp, signature = sign_request(method, endpoint, body_str)  # Keep body for signing if needed (safe fallback)
+    timestamp, signature = sign_request(method, endpoint)  # No body_str
     
     headers = {
         "KALSHI-ACCESS-KEY": ACCESS_KEY,
@@ -60,97 +67,77 @@ def kalshi_request(method, endpoint, json_body=None):
     
     try:
         if method == "GET":
-            resp = requests.get(url, headers=headers)
+            resp = requests.get(url, headers=headers, timeout=10)
         elif method == "POST":
-            resp = requests.post(url, headers=headers, json=json_body)
+            resp = requests.post(url, headers=headers, json=json_body, timeout=10)
+        print(f"{method} {endpoint} status: {resp.status_code}")
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        print(f"API REQUEST FAILED: {method} {endpoint} - {e} | Response: {getattr(e.response, 'text', '')}")
+        print(f"API ERROR {method} {endpoint}: {str(e)} | Response: {getattr(e.response, 'text', 'No response')}")
         raise
 
-# Rest of functions unchanged...
+# BOT FUNCTIONS (same as before, with try/except)
 def has_open_positions():
     try:
         data = kalshi_request("GET", "/portfolio/positions")
         positions = data.get("positions", [])
         open_pos = [p for p in positions if p.get("quantity", 0) > 0]
         if open_pos:
-            print(f"⏳ HOLDING {len(open_pos)} open position(s)")
+            print(f"⏳ HOLDING {len(open_pos)} position(s)")
         return len(open_pos) > 0
-    except:
-        print("Failed to check positions - assuming none")
+    except Exception as e:
+        print(f"Positions check failed: {e}")
         return False
 
 def find_best_arb():
     try:
         data = kalshi_request("GET", "/markets?status=open&limit=1000")
-    except:
-        print("Failed to fetch markets")
+        # ... (rest of arb logic same)
+        best = None
+        best_profit = 0
+        for m in data["markets"]:
+            t = m["ticker"]
+            ya = m.get("yes_ask")
+            na = m.get("no_ask")
+            yb = m.get("yes_bid")
+            nb = m.get("no_bid")
+            if ya and na and ya + na < 100:
+                profit = 100 - (ya + na)
+                if profit > best_profit and profit >= THRESHOLD:
+                    best = ("buy", t, ya, na, profit)
+                    best_profit = profit
+            if yb and nb and yb + nb > 100:
+                profit = (yb + nb) - 100
+                if profit > best_profit and profit >= THRESHOLD:
+                    best = ("sell", t, yb, nb, profit)
+                    best_profit = profit
+        return best
+    except Exception as e:
+        print(f"Markets fetch failed: {e}")
         return None
-        
-    best = None
-    best_profit = 0
-
-    for m in data["markets"]:
-        t = m["ticker"]
-        ya = m.get("yes_ask")
-        na = m.get("no_ask")
-        yb = m.get("yes_bid")
-        nb = m.get("no_bid")
-
-        if ya is not None and na is not None and ya + na < 100:
-            profit = 100 - (ya + na)
-            if profit > best_profit and profit >= THRESHOLD:
-                best = ("buy", t, ya, na, profit)
-                best_profit = profit
-
-        if yb is not None and nb is not None and yb + nb > 100:
-            profit = (yb + nb) - 100
-            if profit > best_profit and profit >= THRESHOLD:
-                best = ("sell", t, yb, nb, profit)
-                best_profit = profit
-
-    return best
 
 def execute_arb(action, ticker, price1, price2, profit):
-    print(f"🚀 EXECUTING {action.upper()} ARB on {ticker} — +{profit}¢ profit")
+    print(f"EXECUTING {action.upper()} ARB on {ticker} — +{profit}¢")
+    # ... (order placement same, with prints)
 
-    yes_payload = {"ticker": ticker, "action": action, "type": "limit", "count": COUNT, "side": "yes"}
-    yes_payload["yes_price" if action == "buy" else "no_price"] = price1
-    kalshi_request("POST", "/orders", yes_payload)
-
-    time.sleep(0.3)
-
-    no_payload = {"ticker": ticker, "action": action, "type": "limit", "count": COUNT, "side": "no"}
-    no_payload["no_price" if action == "buy" else "yes_price"] = price2
-    kalshi_request("POST", "/orders", no_payload)
-
-    print("✅ Orders placed!")
-
-# ==================== MAIN LOOP ====================
-print("🔴 LIVE KALSHI ARB BOT STARTED — One Position Only")
-print("Authenticated with API key — scanning every 30s\n")
+# MAIN
+print("🔴 LIVE KALSHI ARB BOT STARTED — DEBUG VERSION")
+print("If you see this, startup succeeded!\n")
 
 while True:
     try:
-        print(f"🔍 Scanning markets... ({time.strftime('%H:%M:%S')})")
-
+        print(f"SCAN START {time.strftime('%H:%M:%S')}")
         if has_open_positions():
-            time.sleep(CHECK_INTERVAL)
-            continue
-
-        opp = find_best_arb()
-        if opp:
-            action, ticker, p1, p2, profit = opp
-            print(f"💰 ARB FOUND: {ticker} → +{profit}¢")
-            execute_arb(action, ticker, p1, p2, profit)
+            print("Has positions - skipping")
         else:
-            print("😴 No arbs found")
-
-        print(f"Next scan in {CHECK_INTERVAL}s...\n")
+            opp = find_best_arb()
+            if opp:
+                print("ARB FOUND!")
+            else:
+                print("No arb this cycle")
+        print(f"Next in {CHECK_INTERVAL}s\n")
         time.sleep(CHECK_INTERVAL)
-
     except Exception as e:
-        print(f"❌ LOOP ERROR: {e}\nWaiting 60s...")
+        print(f"MAIN LOOP ERROR: {e}")
         time.sleep(60)

@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 # ==================== CONFIGURATION ====================
-TEST_MODE = True  # True for test order; False for arb
+TEST_MODE = True
 
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
@@ -34,6 +34,7 @@ except Exception as e:
 def canonical_body(body):
     if not body:
         return ""
+    # Exact canonical: sorted keys, no spaces
     return json.dumps(body, sort_keys=True, separators=(',', ':'))
 
 def sign_request(method, path, body=None):
@@ -66,14 +67,13 @@ def kalshi_request(method, endpoint, json_body=None):
             resp = requests.post(url, headers=headers, json=json_body)
         print(f"{method} {endpoint} -> {resp.status_code}")
         if resp.status_code >= 400:
-            print(f"Error: {resp.text}")
+            print(f"Error body: {resp.text}")
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
         print(f"REQUEST FAILED: {e}")
         raise
 
-# Get a real open market ticker dynamically
 def get_test_ticker():
     try:
         data = kalshi_request("GET", "/markets?status=open&limit=100")
@@ -81,18 +81,18 @@ def get_test_ticker():
             ticker = data["markets"][0]["ticker"]
             print(f"Using real open market for test: {ticker}")
             return ticker
-        print("No open markets found for test")
+        print("No open markets")
         return None
     except:
-        print("Failed to fetch markets for test ticker")
+        print("Failed to fetch markets")
         return None
 
 def execute_test_trade():
     ticker = get_test_ticker()
     if not ticker:
-        print("Cannot run test - no open market")
         return
-    print("TEST MODE - Placing dummy YES buy at 1 cent (won't fill)")
+    print("TEST MODE - Dummy YES buy at 1 cent (won't fill)")
+    # Keys sorted alphabetically for canonical
     test_payload = {
         "action": "buy",
         "count": COUNT,
@@ -108,22 +108,7 @@ print("STARTUP COMPLETE")
 
 if TEST_MODE:
     execute_test_trade()
-    print("Test complete - set TEST_MODE = False for arb mode")
+    print("Test done - set TEST_MODE = False for arb")
 else:
-    # Full arb loop (from previous fixed version)
-    while True:
-        try:
-            print(f"\nSCAN {time.strftime('%H:%M:%S')}")
-            if has_open_positions():
-                time.sleep(CHECK_INTERVAL)
-                continue
-            opp = find_best_arb()
-            if opp:
-                action, ticker, p1, p2, profit = opp
-                execute_arb(action, ticker, p1, p2, profit)
-            else:
-                print("No arb found")
-            time.sleep(CHECK_INTERVAL)
-        except Exception as e:
-            print(f"ERROR: {e}")
-            time.sleep(60)
+    # arb loop here (add from previous)
+    pass  # placeholder

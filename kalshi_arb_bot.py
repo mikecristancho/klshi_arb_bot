@@ -75,21 +75,50 @@ def execute_arb(token, action, ticker, price1, price2, profit):
     headers = {"Authorization": f"Bearer {token}"}
     url = f"{BASE_URL}/orders"
 
-    # Yes side order
+    # Yes side
     p1 = {"ticker": ticker, "action": action, "type": "limit", "count": COUNT, "side": "yes"}
     p1["yes_price" if action == "buy" else "no_price"] = price1
 
-    # No side order
+    # No side
     p2 = {"ticker": ticker, "action": action, "type": "limit", "count": COUNT, "side": "no"}
     p2["no_price" if action == "buy" else "yes_price"] = price2
 
-    print(f"🚀 EXECUTING {action.upper()} ARB on {ticker} — +{profit}¢ expected profit")
+    print(f"🚀 EXECUTING {action.upper()} ARB on {ticker} — +{profit}¢ profit")
 
-    # Place orders
     r1 = requests.post(url, headers=headers, json=p1)
     time.sleep(0.3)
     r2 = requests.post(url, headers=headers, json=p2)
 
-    # FIXED PRINT STATEMENTS (closed quotes!)
     print("YES order:", "OK" if r1.status_code == 200 else f"FAIL {r1.text}")
     print("NO order: ", "OK" if r2.status_code == 200 else f"FAIL {r2.text}")
+
+# ==================== MAIN LOOP ====================
+if not EMAIL or not PASSWORD:
+    raise ValueError("Set KALSHI_EMAIL and KALSHI_PASSWORD env vars!")
+
+print("🔴 LIVE KALSHI ARB BOT (One Position Only) - NEW ENDPOINT")
+token = login()
+
+while True:
+    try:
+        if has_open_positions(token):
+            time.sleep(CHECK_INTERVAL)
+            continue
+
+        opp = find_best_arb(token)
+        if opp:
+            action, ticker, p1, p2, profit = opp
+            print(f"💰 BEST ARB: {ticker} → {action.upper()} → +{profit}¢")
+            execute_arb(token, action, ticker, p1, p2, profit)
+        else:
+            print("😴 No arbs found above threshold")
+
+        time.sleep(CHECK_INTERVAL)
+
+    except Exception as e:
+        print(f"❌ ERROR: {e}")
+        time.sleep(30)
+        try:
+            token = login()
+        except:
+            time.sleep(60)

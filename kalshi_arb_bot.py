@@ -75,18 +75,21 @@ def execute_arb(token, action, ticker, price1, price2, profit):
     headers = {"Authorization": f"Bearer {token}"}
     url = f"{BASE_URL}/orders"
 
-    # Yes side
+    # Yes side order
     p1 = {"ticker": ticker, "action": action, "type": "limit", "count": COUNT, "side": "yes"}
     p1["yes_price" if action == "buy" else "no_price"] = price1
 
-    # No side
+    # No side order
     p2 = {"ticker": ticker, "action": action, "type": "limit", "count": COUNT, "side": "no"}
     p2["no_price" if action == "buy" else "yes_price"] = price2
 
-    print(f"🚀 EXECUTING {action.upper()} ARB on {ticker} — +{profit}¢ profit")
+    print(f"🚀 EXECUTING {action.upper()} ARB on {ticker} — +{profit}¢ expected profit")
 
+    # Place orders
     r1 = requests.post(url, headers=headers, json=p1)
     time.sleep(0.3)
     r2 = requests.post(url, headers=headers, json=p2)
 
-    print("YES order:", "
+    # FIXED PRINT STATEMENTS (closed quotes!)
+    print("YES order:", "OK" if r1.status_code == 200 else f"FAIL {r1.text}")
+    print("NO order: ", "OK" if r2.status_code == 200 else f"FAIL {r2.text}")

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
-# ===================== CONFIGURATION ====================
+# ==================== CONFIGURATION ====================
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
 # Set these in Render.com environment variables

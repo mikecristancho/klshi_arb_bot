@@ -95,5 +95,29 @@ print("STARTUP COMPLETE")
 
 if TEST_MODE:
     execute_test_trade()
+    print("Test order submitted! Check your Kalshi account → Orders tab (cancel the test order if it appears)")
+    print("Once test works, set TEST_MODE = False and redeploy for full arbitrage mode")
 else:
-    # arb loop...
+    print("FULL ARB MODE ACTIVE - Scanning every 30 seconds")
+    while True:
+        try:
+            print(f"\n🔍 SCAN START {time.strftime('%H:%M:%S')}")
+            if has_open_positions():
+                print("Position open - waiting for settlement")
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            opp = find_best_arb()
+            if opp:
+                action, ticker, p1, p2, profit = opp
+                print(f"💰 ARB FOUND: {ticker} | {action.upper()} | +{profit}¢ profit")
+                execute_arb(action, ticker, p1, p2, profit)
+            else:
+                print("😴 No arbitrage opportunity found this cycle")
+
+            print(f"Next scan in {CHECK_INTERVAL} seconds...")
+            time.sleep(CHECK_INTERVAL)
+
+        except Exception as e:
+            print(f"❌ LOOP ERROR: {e}")
+            time.sleep(60)
